@@ -1,0 +1,15 @@
+{
+  "name": "disconnect-post-manager-cloudflare",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram channel post manager on Cloudflare Workers + D1",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

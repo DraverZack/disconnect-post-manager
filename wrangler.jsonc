@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "disconnect-post-manager",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-12",
+  "workers_dev": true,
+  "keep_vars": true,
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB"
+    }
+  ]
+}
