@@ -168,6 +168,36 @@ async function sendButtonIconPicker(app, chatId, buttonId) {
   });
 }
 
+
+async function sendNewButtonIconPicker(app, chatId) {
+  const presets = await app.store.getIconPresets();
+  const rows = [];
+  for (let i = 0; i < ICON_SERVICES.length; i += 2) {
+    const pair = ICON_SERVICES.slice(i, i + 2).map((service) => {
+      const saved = presets[service.key];
+      const icon = saved?.fallback || service.fallback;
+      return btn(`${saved?.id ? '✅ ' : ''}${icon} ${service.label}`, `newbtnicon:preset:${service.key}`);
+    });
+    rows.push(pair);
+  }
+  rows.push([btn('➕ Своя custom emoji', 'newbtnicon:custom')]);
+  rows.push([btn('🚫 Без иконки', 'newbtnicon:none')]);
+
+  await app.api.sendMessage(chatId, '🧩 Выбери иконку для новой кнопки.\n\nСохранённые в библиотеке custom emoji отмечены ✅.', {
+    reply_markup: { inline_keyboard: rows },
+  });
+}
+
+async function sendNewButtonStylePicker(app, chatId) {
+  await app.api.sendMessage(chatId, '🎨 Выбери цвет кнопки:', {
+    reply_markup: kb(
+      [btn('⚪ Стандартный', 'newbtnstyle:none')],
+      [btn('🔵 Синий', 'newbtnstyle:primary'), btn('🟢 Зелёный', 'newbtnstyle:success')],
+      [btn('🔴 Красный', 'newbtnstyle:danger')],
+    ),
+  });
+}
+
 async function listPosts(app, chatId, status, page = 0) {
   const limit = 8;
   const offsetRows = page * limit;
@@ -641,14 +671,28 @@ async function handleOwnerMessage(app, message) {
       await app.api.sendMessage(chatId, 'Ссылка должна начинаться с http://, https:// или tg://');
       return;
     }
-    await app.store.setSession(userId, { ...session, action: 'add_button_style', temp: { ...session.temp, url: text } });
-    await app.api.sendMessage(chatId, '🎨 Выбери цвет кнопки:', {
-      reply_markup: kb(
-        [btn('⚪ Стандартный', 'newbtnstyle:none')],
-        [btn('🔵 Синий', 'newbtnstyle:primary'), btn('🟢 Зелёный', 'newbtnstyle:success')],
-        [btn('🔴 Красный', 'newbtnstyle:danger')],
-      ),
-    });
+    await app.store.setSession(userId, { ...session, action: 'add_button_icon', temp: { ...session.temp, url: text } });
+    await sendNewButtonIconPicker(app, chatId);
+    return;
+  }
+
+  if (session.action === 'add_button_custom_icon') {
+    const icon = findFirstCustomEmoji(message.text || '', message.entities ?? []);
+    if (!icon) {
+      await app.api.sendMessage(chatId, 'Отправь именно Telegram custom emoji одним сообщением.\n\n/cancel — отменить.');
+      return;
+    }
+    const next = {
+      ...session,
+      action: 'add_button_style',
+      temp: {
+        ...session.temp,
+        iconCustomEmojiId: icon.id,
+        iconFallback: icon.fallback,
+      },
+    };
+    await app.store.setSession(userId, next);
+    await sendNewButtonStylePicker(app, chatId);
     return;
   }
 
@@ -890,7 +934,7 @@ async function handleCallback(app, q) {
   if (data.startsWith('buttons:add:')) {
     const postId = Number(data.split(':')[2]);
     await app.store.setSession(userId, { action: 'add_button_label', postId });
-    await app.api.sendMessage(chatId, '🔘 Отправь текст новой кнопки.\n\nЧтобы использовать Telegram custom emoji как настоящую иконку кнопки, поставь его первым перед текстом, например:\n[custom emoji] Смотреть на YouTube');
+    await app.api.sendMessage(chatId, '🔘 Отправь текст новой кнопки.\n\nПосле ссылки бот отдельно предложит выбрать иконку из сохранённой библиотеки, свою custom emoji или вариант без иконки.');
     return;
   }
   if (data.startsWith('button:')) {
@@ -983,6 +1027,54 @@ async function handleCallback(app, q) {
     }
     return;
   }
+  if (data.startsWith('newbtnicon:')) {
+    const session = await app.store.getSession(userId);
+    if (!session || session.action !== 'add_button_icon') {
+      await app.api.sendMessage(chatId, 'Сессия создания кнопки уже закончилась. Начни заново.');
+      return;
+    }
+
+    const [, mode, value] = data.split(':');
+
+    if (mode === 'preset') {
+      const service = iconService(value);
+      const presets = await app.store.getIconPresets();
+      const saved = presets[value];
+      if (!service || !saved?.id) {
+        await app.api.sendMessage(chatId, `Для ${service?.label || value} custom emoji ещё не сохранена.\n\nОткрой ⚙️ Настройки → 🧩 Библиотека иконок и добавь её один раз.`);
+        await sendNewButtonIconPicker(app, chatId);
+        return;
+      }
+      await app.store.setSession(userId, {
+        ...session,
+        action: 'add_button_style',
+        temp: {
+          ...session.temp,
+          iconCustomEmojiId: saved.id,
+          iconFallback: saved.fallback || service.fallback,
+        },
+      });
+      await sendNewButtonStylePicker(app, chatId);
+      return;
+    }
+
+    if (mode === 'custom') {
+      await app.store.setSession(userId, { ...session, action: 'add_button_custom_icon' });
+      await app.api.sendMessage(chatId, '🧩 Отправь свою Telegram custom emoji одним сообщением.\n\n/cancel — отменить.');
+      return;
+    }
+
+    if (mode === 'none') {
+      await app.store.setSession(userId, {
+        ...session,
+        action: 'add_button_style',
+        temp: { ...session.temp, iconCustomEmojiId: null, iconFallback: null },
+      });
+      await sendNewButtonStylePicker(app, chatId);
+      return;
+    }
+  }
+
   if (data.startsWith('newbtnstyle:')) {
     const styleRaw = data.split(':')[1];
     const session = await app.store.getSession(userId);
@@ -990,21 +1082,7 @@ async function handleCallback(app, q) {
       await app.api.sendMessage(chatId, 'Сессия создания кнопки уже закончилась. Начни заново.');
       return;
     }
-    let temp = { ...session.temp };
-    if (!temp.iconCustomEmojiId) {
-      const service = inferIconService(temp.url);
-      if (service) {
-        const presets = await app.store.getIconPresets();
-        const saved = presets[service.key];
-        if (saved?.id) {
-          temp = {
-            ...temp,
-            iconCustomEmojiId: saved.id,
-            iconFallback: saved.fallback || service.fallback,
-          };
-        }
-      }
-    }
+    const temp = { ...session.temp };
     const id = await app.store.addButton(session.postId, {
       ...temp,
       style: styleRaw === 'none' ? null : styleRaw,
