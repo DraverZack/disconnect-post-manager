@@ -13,6 +13,28 @@ import {
 const kb = (...rows) => ({ inline_keyboard: rows });
 const btn = (text, callback_data) => ({ text, callback_data });
 
+const ICON_SERVICES = [
+  { key: 'youtube', label: 'YouTube', fallback: '▶️', hosts: ['youtube.com', 'youtu.be'] },
+  { key: 'twitch', label: 'Twitch', fallback: '🟣', hosts: ['twitch.tv'] },
+  { key: 'telegram', label: 'Telegram', fallback: '✈️', hosts: ['t.me', 'telegram.me'] },
+  { key: 'discord', label: 'Discord', fallback: '💬', hosts: ['discord.com', 'discord.gg'] },
+  { key: 'boosty', label: 'Boosty', fallback: '🟠', hosts: ['boosty.to'] },
+  { key: 'vk', label: 'VK', fallback: '🔵', hosts: ['vk.com', 'vk.ru'] },
+];
+
+function iconService(key) {
+  return ICON_SERVICES.find((x) => x.key === key) || null;
+}
+
+function inferIconService(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return ICON_SERVICES.find((x) => x.hosts.some((h) => host === h || host.endsWith(`.${h}`))) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function ownerOnly(store, userId) {
   const ownerId = await store.getOwnerId();
   return ownerId != null && Number(userId) === Number(ownerId);
@@ -98,8 +120,51 @@ async function sendSettings(app, chatId) {
     reply_markup: kb(
       [btn(channel.id ? '🔄 Переподключить канал' : '➕ Подключить канал', 'settings:channel')],
       [btn('🧪 Проверить права бота', 'settings:check')],
+      [btn('🧩 Библиотека иконок', 'icons:menu')],
       [btn('« Назад', 'main:menu')],
     ),
+  });
+}
+
+
+async function sendIconLibrary(app, chatId) {
+  const presets = await app.store.getIconPresets();
+  const rows = ICON_SERVICES.map((service) => {
+    const saved = presets[service.key];
+    const status = saved?.id ? '✅' : '➕';
+    const icon = saved?.fallback || service.fallback;
+    return [btn(`${status} ${icon} ${service.label}`, `icons:configure:${service.key}`)];
+  });
+  rows.push([btn('« Настройки', 'main:settings')]);
+
+  await app.api.sendMessage(chatId, [
+    '🧩 Библиотека иконок',
+    '',
+    'Здесь можно один раз сохранить Telegram custom emoji для популярных сервисов.',
+    'После этого иконку можно применять к любой кнопке одним нажатием. Для новой кнопки бот также попробует выбрать сохранённую иконку автоматически по ссылке.',
+    '',
+    '✅ — custom emoji уже сохранена',
+    '➕ — ещё не настроена',
+  ].join('\n'), { reply_markup: { inline_keyboard: rows } });
+}
+
+async function sendButtonIconPicker(app, chatId, buttonId) {
+  const presets = await app.store.getIconPresets();
+  const rows = [];
+  for (let i = 0; i < ICON_SERVICES.length; i += 2) {
+    const pair = ICON_SERVICES.slice(i, i + 2).map((service) => {
+      const saved = presets[service.key];
+      const icon = saved?.fallback || service.fallback;
+      return btn(`${saved?.id ? '✅ ' : ''}${icon} ${service.label}`, `useicon:${buttonId}:${service.key}`);
+    });
+    rows.push(pair);
+  }
+  rows.push([btn('➕ Своя custom emoji', `customicon:${buttonId}`)]);
+  rows.push([btn('🚫 Без иконки', `clearicon:${buttonId}`)]);
+  rows.push([btn('« К кнопке', `button:${buttonId}`)]);
+
+  await app.api.sendMessage(chatId, '🧩 Выбери иконку.\n\nЕсли рядом с сервисом нет ✅, сначала настрой его custom emoji в ⚙️ Настройки → Библиотека иконок.', {
+    reply_markup: { inline_keyboard: rows },
   });
 }
 
@@ -524,6 +589,29 @@ async function handleOwnerMessage(app, message) {
     return;
   }
 
+  if (session.action === 'set_icon_preset') {
+    const icon = findFirstCustomEmoji(message.text || '', message.entities ?? []);
+    const service = iconService(session.serviceKey);
+    if (!service) {
+      await app.store.clearSession(userId);
+      await app.api.sendMessage(chatId, 'Неизвестный сервис.');
+      return;
+    }
+    if (!icon) {
+      await app.api.sendMessage(chatId, `Отправь именно Telegram custom emoji для ${service.label} одним сообщением.\n\n/cancel — отменить.`);
+      return;
+    }
+    await app.store.setIconPreset(service.key, {
+      id: icon.id,
+      fallback: icon.fallback || service.fallback,
+      label: service.label,
+    });
+    await app.store.clearSession(userId);
+    await app.api.sendMessage(chatId, `✅ Иконка ${service.label} сохранена в библиотеке.`);
+    await sendIconLibrary(app, chatId);
+    return;
+  }
+
   if (session.action === 'add_button_label') {
     if (!text) {
       await app.api.sendMessage(chatId, 'Отправь название кнопки. Можно начать его с Telegram custom emoji.');
@@ -645,6 +733,34 @@ async function handleCallback(app, q) {
     } catch (e) {
       await app.api.sendMessage(chatId, `❌ Ошибка проверки:\n${e.message}`);
     }
+    return;
+  }
+
+  if (data === 'icons:menu') {
+    await app.store.clearSession(userId);
+    await sendIconLibrary(app, chatId);
+    return;
+  }
+  if (data.startsWith('icons:configure:')) {
+    const serviceKey = data.split(':')[2];
+    const service = iconService(serviceKey);
+    if (!service) return;
+    const presets = await app.store.getIconPresets();
+    const saved = presets[serviceKey];
+    const extraRows = [];
+    if (saved?.id) extraRows.push([btn('🗑 Удалить сохранённую иконку', `icons:clear:${serviceKey}`)]);
+    extraRows.push([btn('« К библиотеке', 'icons:menu')]);
+    await app.store.setSession(userId, { action: 'set_icon_preset', serviceKey });
+    await app.api.sendMessage(chatId, `🧩 ${service.label}\n\nОтправь Telegram custom emoji, которую хочешь использовать как иконку ${service.label}. Она будет сохранена и доступна для всех кнопок.\n\n/cancel — отменить.`, {
+      reply_markup: { inline_keyboard: extraRows },
+    });
+    return;
+  }
+  if (data.startsWith('icons:clear:')) {
+    const serviceKey = data.split(':')[2];
+    await app.store.clearIconPreset(serviceKey);
+    await app.store.clearSession(userId);
+    await sendIconLibrary(app, chatId);
     return;
   }
 
@@ -813,10 +929,32 @@ async function handleCallback(app, q) {
   }
   if (data.startsWith('b:icon:')) {
     const buttonId = Number(data.split(':')[2]);
+    await app.store.clearSession(userId);
+    await sendButtonIconPicker(app, chatId, buttonId);
+    return;
+  }
+  if (data.startsWith('customicon:')) {
+    const buttonId = Number(data.split(':')[1]);
     await app.store.setSession(userId, { action: 'edit_button_icon', buttonId });
-    await app.api.sendMessage(chatId, '🧩 Отправь Telegram custom emoji.\n\nИли убери иконку:', {
-      reply_markup: kb([btn('🚫 Без иконки', `clearicon:${buttonId}`)]),
+    await app.api.sendMessage(chatId, '🧩 Отправь Telegram custom emoji одним сообщением.\n\n/cancel — отменить.');
+    return;
+  }
+  if (data.startsWith('useicon:')) {
+    const [, buttonIdRaw, serviceKey] = data.split(':');
+    const buttonId = Number(buttonIdRaw);
+    const service = iconService(serviceKey);
+    const presets = await app.store.getIconPresets();
+    const saved = presets[serviceKey];
+    if (!service || !saved?.id) {
+      await app.api.sendMessage(chatId, `Для ${service?.label || serviceKey} custom emoji ещё не сохранена.\n\nОткрой ⚙️ Настройки → 🧩 Библиотека иконок и добавь её один раз.`);
+      return;
+    }
+    const b = await app.store.updateButton(buttonId, {
+      icon_custom_emoji_id: saved.id,
+      icon_fallback: saved.fallback || service.fallback,
     });
+    if (b) await updatePublishedMarkup(app, b.post_id);
+    await sendButtonCard(app, chatId, buttonId);
     return;
   }
   if (data.startsWith('clearicon:')) {
@@ -852,8 +990,23 @@ async function handleCallback(app, q) {
       await app.api.sendMessage(chatId, 'Сессия создания кнопки уже закончилась. Начни заново.');
       return;
     }
+    let temp = { ...session.temp };
+    if (!temp.iconCustomEmojiId) {
+      const service = inferIconService(temp.url);
+      if (service) {
+        const presets = await app.store.getIconPresets();
+        const saved = presets[service.key];
+        if (saved?.id) {
+          temp = {
+            ...temp,
+            iconCustomEmojiId: saved.id,
+            iconFallback: saved.fallback || service.fallback,
+          };
+        }
+      }
+    }
     const id = await app.store.addButton(session.postId, {
-      ...session.temp,
+      ...temp,
       style: styleRaw === 'none' ? null : styleRaw,
     });
     await app.store.clearSession(userId);

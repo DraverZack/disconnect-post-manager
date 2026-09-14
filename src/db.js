@@ -110,6 +110,22 @@ export class Store {
     await this.setSetting('owner_user_id', String(id));
   }
 
+  async getIconPresets() {
+    return safeJsonParse(await this.getSetting('icon_presets_json', '{}'), {});
+  }
+
+  async setIconPreset(key, preset) {
+    const presets = await this.getIconPresets();
+    presets[key] = preset;
+    await this.setSetting('icon_presets_json', JSON.stringify(presets));
+  }
+
+  async clearIconPreset(key) {
+    const presets = await this.getIconPresets();
+    delete presets[key];
+    await this.setSetting('icon_presets_json', JSON.stringify(presets));
+  }
+
   async getSession(userId) {
     const row = await this.first('SELECT data_json FROM sessions WHERE user_id = ?', String(userId));
     return row ? safeJsonParse(row.data_json, null) : null;
