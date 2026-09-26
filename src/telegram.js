@@ -1,5 +1,3 @@
-import { stripCustomEmojiEntities } from './utils.js';
-
 export class TelegramApiError extends Error {
   constructor(method, response) {
     super(`${method}: ${response?.description ?? 'Telegram API error'}`);
@@ -18,13 +16,29 @@ export class TelegramApi {
   }
 
   async call(method, params = {}) {
-    const res = await fetch(`${this.base}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    const body = await res.json().catch(() => null);
-    if (!body?.ok) throw new TelegramApiError(method, body);
+    let res;
+    let body;
+    try {
+      res = await fetch(`${this.base}/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      body = await res.json().catch(() => null);
+    } catch {
+      // Transport errors can include the request URL containing BOT_TOKEN.
+      throw new TelegramApiError(method, {
+        description: 'Ошибка соединения с Telegram. Результат запроса неизвестен. Автоматический повтор не выполнен; проверь сообщение перед повтором.',
+      });
+    }
+    if (!body?.ok) {
+      const token = this.base.slice('https://api.telegram.org/bot'.length);
+      throw new TelegramApiError(method, {
+        error_code: body?.error_code ?? res.status,
+        description: String(body?.description ?? 'Telegram вернул некорректный ответ. Результат запроса неизвестен; проверь сообщение перед повтором.')
+          .split(token).join('[REDACTED]'),
+      });
+    }
     return body.result;
   }
 
@@ -106,9 +120,7 @@ export class TelegramApi {
   }
 
   async sendPost(chatId, post, replyMarkup, { preview = false } = {}) {
-    const fallbackMarkup = replyMarkup?.__fallbackMarkup ?? null;
-    const primaryMarkup = replyMarkup ? { ...replyMarkup } : undefined;
-    if (primaryMarkup) delete primaryMarkup.__fallbackMarkup;
+    const primaryMarkup = replyMarkup;
 
     const common = {
       disable_notification: preview ? true : post.disable_notification,
@@ -116,7 +128,6 @@ export class TelegramApi {
     };
 
     const withEntities = post.entities?.length ? post.entities : undefined;
-    const fallbackEntities = stripCustomEmojiEntities(post.entities ?? []);
 
     const send = async (entities, markup) => {
       if (!post.media_type) {
@@ -156,26 +167,15 @@ export class TelegramApi {
       });
     };
 
-    try {
-      return await send(withEntities, primaryMarkup);
-    } catch (error) {
-      // Telegram has extra restrictions for custom emoji in channels/buttons.
-      const customEmojiWasUsed = (post.entities ?? []).some((e) => e?.type === 'custom_emoji')
-        || JSON.stringify(primaryMarkup ?? {}).includes('icon_custom_emoji_id');
-      if (!customEmojiWasUsed) throw error;
-      return send(fallbackEntities, fallbackMarkup ?? primaryMarkup);
-    }
+    return send(withEntities, primaryMarkup);
   }
 
   async editPublishedContent(post, nextContent, replyMarkup) {
     const chatId = post.published_chat_id;
     const messageId = post.published_message_id;
     const entities = nextContent.entities ?? [];
-    const fallbackEntities = stripCustomEmojiEntities(entities);
 
-    const fallbackMarkup = replyMarkup?.__fallbackMarkup ?? null;
-    const primaryMarkup = replyMarkup ? { ...replyMarkup } : undefined;
-    if (primaryMarkup) delete primaryMarkup.__fallbackMarkup;
+    const primaryMarkup = replyMarkup;
 
     const attempt = async (ents, markup) => {
       if (!post.media_type) {
@@ -216,13 +216,6 @@ export class TelegramApi {
       });
     };
 
-    try {
-      return await attempt(entities, primaryMarkup);
-    } catch (error) {
-      const customEmojiWasUsed = entities.some((e) => e?.type === 'custom_emoji')
-        || JSON.stringify(primaryMarkup ?? {}).includes('icon_custom_emoji_id');
-      if (!customEmojiWasUsed) throw error;
-      return attempt(fallbackEntities, fallbackMarkup ?? primaryMarkup);
-    }
+    return attempt(entities, primaryMarkup);
   }
 }
