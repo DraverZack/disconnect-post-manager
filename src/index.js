@@ -378,7 +378,7 @@ async function checkRights(app, chatId) {
   await app.api.sendMessage(chatId, lines.join('\n'));
 }
 
-export async function updatePublishedMarkup(app, postId) {
+export async function updatePublishedMarkup(app, postId, { allowUnchanged = false } = {}) {
   const post = await app.store.getPost(postId);
   if (!post || post.status !== 'published') return;
   const markup = await buildPublicMarkup(app.store, postId);
@@ -386,7 +386,23 @@ export async function updatePublishedMarkup(app, postId) {
     await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, { inline_keyboard: [] });
     return;
   }
-  await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, markup);
+  try {
+    await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, markup);
+  } catch (error) {
+    const unchanged = error instanceof TelegramApiError
+      && error.errorCode === 400
+      && /^Bad Request: message is not modified\b/i.test(error.description);
+    if (!unchanged) throw error;
+    // Only an explicit removal can safely treat an unchanged keyboard as done.
+    if (allowUnchanged) return;
+    const hasCustomIcon = markup.inline_keyboard.some(row => row.some(button => button.icon_custom_emoji_id));
+    throw new TelegramApiError('editMessageReplyMarkup', {
+      error_code: 400,
+      description: hasCustomIcon
+        ? 'Telegram не изменил кнопку: сервер считает её совпадающей с текущей. Бот передал выбранный custom emoji без замены. Этот ответ не подтверждает, что иконка отображается, и не сообщает причину её отсутствия. Повтор без emoji не выполнялся.'
+        : 'Telegram не изменил кнопки: они уже совпадают с отправленными данными.',
+    });
+  }
 }
 
 export async function publishPost(app, chatId, postId) {
@@ -984,7 +1000,7 @@ async function handleCallback(app, q) {
     const buttonId = Number(data.split(':')[1]);
     const b = await app.store.updateButton(buttonId, { icon_custom_emoji_id: null, icon_fallback: null });
     await app.store.clearSession(userId);
-    if (b) await updatePublishedMarkup(app, b.post_id);
+    if (b) await updatePublishedMarkup(app, b.post_id, { allowUnchanged: true });
     await sendButtonCard(app, chatId, buttonId);
     return;
   }
