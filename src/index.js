@@ -378,7 +378,28 @@ async function checkRights(app, chatId) {
   await app.api.sendMessage(chatId, lines.join('\n'));
 }
 
-export async function updatePublishedMarkup(app, postId, { allowUnchanged = false } = {}) {
+export function describeIconResult(markup, result) {
+  const requested = (markup?.inline_keyboard ?? []).flatMap((row, r) => row.flatMap((button, c) =>
+    button.icon_custom_emoji_id ? [{ r, c, id: button.icon_custom_emoji_id }] : []));
+  if (!requested.length) return null;
+  const heading = `🔎 Диагностика иконок\nОбновление кнопок принято Telegram.\nОтправлено custom emoji: ${requested.length}.`;
+  if (!result || typeof result !== 'object' || !Number.isInteger(result.message_id)) {
+    return `${heading}\nВ ответе нет объекта сообщения — проверить иконки невозможно.`;
+  }
+  let matching = 0, missing = 0, different = 0;
+  for (const { r, c, id } of requested) {
+    const returned = result.reply_markup?.inline_keyboard?.[r]?.[c]?.icon_custom_emoji_id;
+    if (!returned) missing++;
+    else if (String(returned) === String(id)) matching++;
+    else different++;
+  }
+  return `${heading}\nСовпадают в ответе: ${matching}.\nОтсутствуют в ответе: ${missing}.\nВозвращён другой ID: ${different}.\n` +
+    (matching === requested.length
+      ? 'Telegram вернул все выбранные иконки. Если их не видно, проверь этот пост в другом клиенте Telegram.'
+      : 'Ответ Telegram не подтверждает все отправленные иконки. Это не устанавливает причину и само по себе не доказывает ограничение Premium.');
+}
+
+export async function updatePublishedMarkup(app, postId, { allowUnchanged = false, diagnosticChatId } = {}) {
   const post = await app.store.getPost(postId);
   if (!post || post.status !== 'published') return;
   const markup = await buildPublicMarkup(app.store, postId);
@@ -386,8 +407,9 @@ export async function updatePublishedMarkup(app, postId, { allowUnchanged = fals
     await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, { inline_keyboard: [] });
     return;
   }
+  let result;
   try {
-    await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, markup);
+    result = await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, markup);
   } catch (error) {
     const unchanged = error instanceof TelegramApiError
       && error.errorCode === 400
@@ -402,6 +424,15 @@ export async function updatePublishedMarkup(app, postId, { allowUnchanged = fals
         ? 'Telegram не изменил кнопку: сервер считает её совпадающей с текущей. Бот передал выбранный custom emoji без замены. Этот ответ не подтверждает, что иконка отображается, и не сообщает причину её отсутствия. Повтор без emoji не выполнялся.'
         : 'Telegram не изменил кнопки: они уже совпадают с отправленными данными.',
     });
+  }
+  const diagnostic = describeIconResult(markup, result);
+  if (diagnostic && diagnosticChatId) {
+    try {
+      await app.api.sendMessage(diagnosticChatId, diagnostic);
+    } catch {
+      // The edit succeeded; a notification failure must not suggest retrying it.
+      console.error('Could not send icon diagnostic notification');
+    }
   }
 }
 
@@ -702,7 +733,7 @@ async function handleOwnerMessage(app, message) {
     }
     const b = await app.store.updateButton(session.buttonId, patch);
     await app.store.clearSession(userId);
-    if (b) await updatePublishedMarkup(app, b.post_id);
+    if (b) await updatePublishedMarkup(app, b.post_id, { diagnosticChatId: chatId });
     await sendButtonCard(app, chatId, session.buttonId);
     return;
   }
@@ -714,7 +745,7 @@ async function handleOwnerMessage(app, message) {
     }
     const b = await app.store.updateButton(session.buttonId, { url: text });
     await app.store.clearSession(userId);
-    if (b) await updatePublishedMarkup(app, b.post_id);
+    if (b) await updatePublishedMarkup(app, b.post_id, { diagnosticChatId: chatId });
     await sendButtonCard(app, chatId, session.buttonId);
     return;
   }
@@ -730,7 +761,7 @@ async function handleOwnerMessage(app, message) {
       icon_fallback: icon.fallback,
     });
     await app.store.clearSession(userId);
-    if (b) await updatePublishedMarkup(app, b.post_id);
+    if (b) await updatePublishedMarkup(app, b.post_id, { diagnosticChatId: chatId });
     await sendButtonCard(app, chatId, session.buttonId);
   }
 }
@@ -962,7 +993,7 @@ async function handleCallback(app, q) {
   if (data.startsWith('setstyle:')) {
     const [, idRaw, styleRaw] = data.split(':');
     const b = await app.store.updateButton(Number(idRaw), { style: styleRaw === 'none' ? null : styleRaw });
-    if (b) await updatePublishedMarkup(app, b.post_id);
+    if (b) await updatePublishedMarkup(app, b.post_id, { diagnosticChatId: chatId });
     await sendButtonCard(app, chatId, Number(idRaw));
     return;
   }
@@ -992,7 +1023,7 @@ async function handleCallback(app, q) {
       icon_custom_emoji_id: saved.id,
       icon_fallback: saved.fallback || service.fallback,
     });
-    if (b) await updatePublishedMarkup(app, b.post_id);
+    if (b) await updatePublishedMarkup(app, b.post_id, { diagnosticChatId: chatId });
     await sendButtonCard(app, chatId, buttonId);
     return;
   }
@@ -1000,7 +1031,7 @@ async function handleCallback(app, q) {
     const buttonId = Number(data.split(':')[1]);
     const b = await app.store.updateButton(buttonId, { icon_custom_emoji_id: null, icon_fallback: null });
     await app.store.clearSession(userId);
-    if (b) await updatePublishedMarkup(app, b.post_id, { allowUnchanged: true });
+    if (b) await updatePublishedMarkup(app, b.post_id, { allowUnchanged: true, diagnosticChatId: chatId });
     await sendButtonCard(app, chatId, buttonId);
     return;
   }
@@ -1017,7 +1048,7 @@ async function handleCallback(app, q) {
     const buttonId = Number(data.split(':')[2]);
     const removed = await app.store.deleteButton(buttonId);
     if (removed) {
-      await updatePublishedMarkup(app, removed.post_id);
+      await updatePublishedMarkup(app, removed.post_id, { diagnosticChatId: chatId });
       await sendButtonsMenu(app, chatId, removed.post_id);
     }
     return;
@@ -1084,7 +1115,7 @@ async function handleCallback(app, q) {
     });
     await app.store.clearSession(userId);
     const post = await app.store.getPost(session.postId);
-    if (post?.status === 'published') await updatePublishedMarkup(app, post.id);
+    if (post?.status === 'published') await updatePublishedMarkup(app, post.id, { diagnosticChatId: chatId });
     await app.api.sendMessage(chatId, `✅ Кнопка #${id} добавлена.`);
     await sendButtonsMenu(app, chatId, session.postId);
   }
