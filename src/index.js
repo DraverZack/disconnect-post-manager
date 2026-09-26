@@ -40,7 +40,7 @@ async function ownerOnly(store, userId) {
   return ownerId != null && Number(userId) === Number(ownerId);
 }
 
-async function buildPublicMarkup(store, postId, { customIcons = true } = {}) {
+export async function buildPublicMarkup(store, postId) {
   const buttons = await store.getButtons(postId);
   if (!buttons.length) return undefined;
 
@@ -50,25 +50,13 @@ async function buildPublicMarkup(store, postId, { customIcons = true } = {}) {
       url: b.url,
       ...(b.style ? { style: b.style } : {}),
     };
-    if (customIcons && b.icon_custom_emoji_id) {
+    if (b.icon_custom_emoji_id) {
       base.icon_custom_emoji_id = b.icon_custom_emoji_id;
-    } else if (!customIcons && b.icon_custom_emoji_id) {
-      base.text = `${b.icon_fallback || '🔗'} ${b.text}`.trim();
     }
     return [base];
   });
 
-  const primary = { inline_keyboard: rows };
-  const fallback = {
-    inline_keyboard: buttons.map((b) => [{
-      text: b.icon_custom_emoji_id ? `${b.icon_fallback || '🔗'} ${b.text}`.trim() : b.text,
-      url: b.url,
-      ...(b.style ? { style: b.style } : {}),
-    }]),
-  };
-
-  primary.__fallbackMarkup = fallback;
-  return primary;
+  return { inline_keyboard: rows };
 }
 
 async function safeAnswerCallback(app, q, text, alert = false) {
@@ -268,10 +256,10 @@ async function sendPostCard(app, chatId, postId) {
   await app.api.sendMessage(chatId, postCardText(post), { reply_markup: { inline_keyboard: rows } });
 }
 
-async function previewPost(app, chatId, postId) {
+export async function previewPost(app, chatId, postId) {
   const post = await app.store.getPost(postId);
   if (!post) return;
-  const markup = await buildPublicMarkup(app.store, post.id, { customIcons: true });
+  const markup = await buildPublicMarkup(app.store, post.id);
   await app.api.sendMessage(chatId, `👁 Предпросмотр поста #${post.id}\n💬 Комментарии после публикации: ${post.comments_enabled ? 'вкл.' : 'выкл.'}`);
   await app.api.sendPost(chatId, post, markup, { preview: true });
 }
@@ -390,27 +378,18 @@ async function checkRights(app, chatId) {
   await app.api.sendMessage(chatId, lines.join('\n'));
 }
 
-async function updatePublishedMarkup(app, postId) {
+export async function updatePublishedMarkup(app, postId) {
   const post = await app.store.getPost(postId);
   if (!post || post.status !== 'published') return;
-  const markup = await buildPublicMarkup(app.store, postId, { customIcons: true });
+  const markup = await buildPublicMarkup(app.store, postId);
   if (!markup) {
     await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, { inline_keyboard: [] });
     return;
   }
-  const fallback = markup.__fallbackMarkup;
-  const primary = { ...markup };
-  delete primary.__fallbackMarkup;
-  try {
-    await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, primary);
-  } catch (e) {
-    const usesCustom = JSON.stringify(primary).includes('icon_custom_emoji_id');
-    if (!usesCustom) throw e;
-    await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, fallback);
-  }
+  await app.api.editMessageReplyMarkup(post.published_chat_id, post.published_message_id, markup);
 }
 
-async function publishPost(app, chatId, postId) {
+export async function publishPost(app, chatId, postId) {
   const channel = await app.store.getChannelSettings();
   if (!channel.id) {
     await app.api.sendMessage(chatId, 'Сначала подключи канал в ⚙️ Настройках.');
@@ -423,7 +402,7 @@ async function publishPost(app, chatId, postId) {
     return;
   }
 
-  const markup = await buildPublicMarkup(app.store, post.id, { customIcons: true });
+  const markup = await buildPublicMarkup(app.store, post.id);
   const sent = await app.api.sendPost(channel.id, post, markup, { preview: false });
   await app.store.markPublished(post.id, channel.id, sent.message_id);
 
@@ -580,7 +559,7 @@ async function handleOwnerMessage(app, message) {
         next.mediaType = null;
         next.mediaFileId = null;
       }
-      const markup = await buildPublicMarkup(app.store, post.id, { customIcons: true });
+      const markup = await buildPublicMarkup(app.store, post.id);
       await app.api.editPublishedContent(post, next, markup);
       if (post.media_type && !next.mediaType) {
         await app.store.updatePostText(post.id, next.text, next.entities, 'edit_published_caption');
@@ -866,7 +845,7 @@ async function handleCallback(app, q) {
     await app.store.setBool(postId, 'link_preview_enabled', !post.link_preview_enabled);
     if (post.status === 'published' && !post.media_type) {
       const fresh = await app.store.getPost(postId);
-      const markup = await buildPublicMarkup(app.store, postId, { customIcons: true });
+      const markup = await buildPublicMarkup(app.store, postId);
       await app.api.editPublishedContent(post, {
         text: fresh.text,
         entities: fresh.entities,
